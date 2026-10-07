@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 
-// 1. DATA MODEL: This defines what a single line on the receipt looks like in code
+// 1. DATA MODEL
 class ReceiptItem {
   final String name;
   final double price;
@@ -46,8 +46,9 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isScanning = false;
   String _errorMessage = "";
   
-  // 2. THE LIST: This will hold all the extracted items
+  // 2. STATE VARIABLES
   List<ReceiptItem> _parsedItems = [];
+  String _receiptCurrency = '\$'; // Default currency
 
   Future<void> _pickAndScanImage() async {
     final XFile? selectedImage = await _picker.pickImage(source: ImageSource.gallery);
@@ -57,7 +58,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _imageFile = selectedImage;
         _isScanning = true;
         _errorMessage = "";
-        _parsedItems.clear(); // Clear old items when a new receipt is uploaded
+        _parsedItems.clear();
       });
 
       await _scanReceipt(selectedImage);
@@ -94,29 +95,73 @@ class _HomeScreenState extends State<HomeScreen> {
         }
 
         final parsedText = json['ParsedResults'][0]['ParsedText'];
-
-        // 3. THE PARSER: Hunt for prices using Regex
-        List<ReceiptItem> tempItems = [];
         
-        // This Regex looks for text, optional spaces/currency symbols, and a decimal number at the end
+        // --- NEW: CURRENCY DETECTOR ---
+        String tempCurrency = '\$'; // Default to dollar
+        String lowerText = parsedText.toLowerCase();
+        
+        // Scan the whole receipt text for specific currency markers
+        if (lowerText.contains('ksh') || lowerText.contains('kes')) {
+          tempCurrency = 'Ksh ';
+        } else if (lowerText.contains('ugx')) {
+          tempCurrency = 'UGX ';
+        } else if (lowerText.contains('tzs')) {
+          tempCurrency = 'TZS ';
+        } else if (parsedText.contains('€')) {
+          tempCurrency = '€';
+        } else if (parsedText.contains('£')) {
+          tempCurrency = '£';
+        }
+
+        // 3. THE SMART PARSER
+        List<ReceiptItem> tempItems = [];
+        List<String> lines = parsedText.split('\n');
+        
+        // Allows for optional currency symbols at the start of the price
         RegExp priceRegex = RegExp(r'^(.*?)\s+[\$£€]?\s*(\d+\.\d{2})\s*$');
         
-        for (String line in parsedText.split('\n')) {
-          Match? match = priceRegex.firstMatch(line.trim());
+        for (int i = 0; i < lines.length; i++) {
+          String currentLine = lines[i].trim();
+          Match? match = priceRegex.firstMatch(currentLine);
           
           if (match != null) {
             String itemName = match.group(1)?.trim() ?? 'Unknown Item';
             double itemPrice = double.tryParse(match.group(2) ?? '0.0') ?? 0.0;
             
-            // Basic filter: ignore the subtotal/total lines for now so they don't look like food
-            if (!itemName.toLowerCase().contains('total') && !itemName.toLowerCase().contains('tax')) {
-              tempItems.add(ReceiptItem(name: itemName, price: itemPrice));
+            String lowerName = itemName.toLowerCase();
+            
+            // FILTER 1: Ignore zero-cost items, payments, and totals
+            if (itemPrice <= 0 ||
+                lowerName.contains('total') || 
+                lowerName.contains('tax') || 
+                lowerName.contains('mpesa') || 
+                lowerName.contains('cash') ||
+                lowerName.contains('change') ||
+                lowerName.contains('pay')) {
+              continue; 
             }
+
+            // FILTER 2: Fix the names
+            if (lowerName.contains(' pc') || lowerName.contains(' kg') || RegExp(r'^\d{4,}').hasMatch(itemName)) {
+                if (i > 0) {
+                    String previousLine = lines[i-1].trim();
+                    if (previousLine.isNotEmpty && !priceRegex.hasMatch(previousLine)) {
+                        itemName = previousLine;
+                    } else {
+                        itemName = itemName.replaceAll(RegExp(r'^\d{4,}\s*'), ''); 
+                        itemName = itemName.replaceAll(RegExp(r'\d+\.\d{2,3}\s*(PC|KG|pc|kg)', caseSensitive: false), '').trim();
+                    }
+                }
+            }
+            
+            tempItems.add(ReceiptItem(name: itemName, price: itemPrice));
           }
         }
 
         setState(() {
           _parsedItems = tempItems;
+          _receiptCurrency = tempCurrency; // Save the detected currency to the state
+          
           if (_parsedItems.isEmpty) {
             _errorMessage = "Couldn't find any prices on this receipt. Try a clearer photo.";
           }
@@ -149,7 +194,6 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             const SizedBox(height: 20),
             
-            // The Upload Button
             ElevatedButton.icon(
               onPressed: _isScanning ? null : _pickAndScanImage,
               icon: const Icon(Icons.document_scanner),
@@ -171,7 +215,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Text(_errorMessage, style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
               ),
 
-            // 4. THE UI: A clickable list of items
+            // 4. THE UI
             if (_parsedItems.isNotEmpty)
               Expanded(
                 child: ListView.builder(
@@ -182,7 +226,8 @@ class _HomeScreenState extends State<HomeScreen> {
                       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                       child: CheckboxListTile(
                         title: Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                        subtitle: Text('\$${item.price.toStringAsFixed(2)}', style: const TextStyle(color: Colors.teal)),
+                        // --- NEW: DISPLAYS THE DYNAMIC CURRENCY ---
+                        subtitle: Text('$_receiptCurrency${item.price.toStringAsFixed(2)}', style: const TextStyle(color: Colors.teal)),
                         value: item.isSelected,
                         activeColor: Colors.teal,
                         onChanged: (bool? value) {
