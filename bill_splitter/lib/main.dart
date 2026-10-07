@@ -3,6 +3,15 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 
+// 1. DATA MODEL: This defines what a single line on the receipt looks like in code
+class ReceiptItem {
+  final String name;
+  final double price;
+  bool isSelected;
+
+  ReceiptItem({required this.name, required this.price, this.isSelected = false});
+}
+
 void main() {
   runApp(const BillSplitterApp());
 }
@@ -35,9 +44,10 @@ class _HomeScreenState extends State<HomeScreen> {
   final ImagePicker _picker = ImagePicker();
   XFile? _imageFile;
   bool _isScanning = false;
-  String _scanResults = "";
-
-  final String mindeeApiKey = "md_TAYNqK4USYKl8J5pVYmA7wZ4Jtb63Asm1CWMR-Ctfk4";
+  String _errorMessage = "";
+  
+  // 2. THE LIST: This will hold all the extracted items
+  List<ReceiptItem> _parsedItems = [];
 
   Future<void> _pickAndScanImage() async {
     final XFile? selectedImage = await _picker.pickImage(source: ImageSource.gallery);
@@ -46,24 +56,25 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() {
         _imageFile = selectedImage;
         _isScanning = true;
-        _scanResults = "Analyzing receipt with AI...";
+        _errorMessage = "";
+        _parsedItems.clear(); // Clear old items when a new receipt is uploaded
       });
 
-      await _scanReceiptWithMindee(selectedImage);
+      await _scanReceipt(selectedImage);
     }
   }
 
-  Future<void> _scanReceiptWithMindee(XFile image) async {
+  Future<void> _scanReceipt(XFile image) async {
     try {
-      // Uses the proxy to bypass browser security and connects to Mindee v5.3
-      final url = Uri.parse('https://proxy.corsfix.com/?https://api.mindee.net/v1/products/mindee/expense_receipts/v5.3/predict');
+      final url = Uri.parse('https://api.ocr.space/parse/image');
       var request = http.MultipartRequest('POST', url);
 
-      request.headers['Authorization'] = 'Token $mindeeApiKey';
+      request.fields['apikey'] = 'helloworld';
+      request.fields['isTable'] = 'true'; 
 
       final bytes = await image.readAsBytes();
       request.files.add(http.MultipartFile.fromBytes(
-        'document',
+        'file', 
         bytes,
         filename: image.name,
       ));
@@ -71,25 +82,56 @@ class _HomeScreenState extends State<HomeScreen> {
       final response = await request.send();
       final responseData = await response.stream.bytesToString();
       
-      if (response.statusCode == 201 || response.statusCode == 200) {
+      if (response.statusCode == 200) {
         final json = jsonDecode(responseData);
-        final document = json['document']['inference']['prediction'];
-        final total = document['total_amount']['value'];
-        final supplier = document['supplier_name']['value'] ?? "Unknown Store";
+        
+        if (json['IsErroredOnProcessing'] == true) {
+           setState(() {
+            _errorMessage = "OCR Error: ${json['ErrorMessage']}";
+            _isScanning = false;
+          });
+          return;
+        }
+
+        final parsedText = json['ParsedResults'][0]['ParsedText'];
+
+        // 3. THE PARSER: Hunt for prices using Regex
+        List<ReceiptItem> tempItems = [];
+        
+        // This Regex looks for text, optional spaces/currency symbols, and a decimal number at the end
+        RegExp priceRegex = RegExp(r'^(.*?)\s+[\$£€]?\s*(\d+\.\d{2})\s*$');
+        
+        for (String line in parsedText.split('\n')) {
+          Match? match = priceRegex.firstMatch(line.trim());
+          
+          if (match != null) {
+            String itemName = match.group(1)?.trim() ?? 'Unknown Item';
+            double itemPrice = double.tryParse(match.group(2) ?? '0.0') ?? 0.0;
+            
+            // Basic filter: ignore the subtotal/total lines for now so they don't look like food
+            if (!itemName.toLowerCase().contains('total') && !itemName.toLowerCase().contains('tax')) {
+              tempItems.add(ReceiptItem(name: itemName, price: itemPrice));
+            }
+          }
+        }
 
         setState(() {
-          _scanResults = "Store: $supplier\nTotal Amount: \$$total";
+          _parsedItems = tempItems;
+          if (_parsedItems.isEmpty) {
+            _errorMessage = "Couldn't find any prices on this receipt. Try a clearer photo.";
+          }
           _isScanning = false;
         });
+
       } else {
         setState(() {
-          _scanResults = "Server Error ${response.statusCode}:\n$responseData";
+          _errorMessage = "Server Error ${response.statusCode}";
           _isScanning = false;
         });
       }
     } catch (e) {
       setState(() {
-        _scanResults = "App Error:\n$e";
+        _errorMessage = "App Error:\n$e";
         _isScanning = false;
       });
     }
@@ -104,35 +146,10 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: Center(
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            if (_imageFile != null) ...[
-              const Icon(Icons.receipt_long, color: Colors.teal, size: 60),
-              const SizedBox(height: 10),
-              Text("File: ${_imageFile!.name}", style: const TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 20),
-            ],
-
-            if (_isScanning)
-              const CircularProgressIndicator()
-            else if (_scanResults.isNotEmpty)
-              Container(
-                padding: const EdgeInsets.all(16),
-                margin: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.teal.shade50,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.teal),
-                ),
-                child: Text(
-                  _scanResults,
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  textAlign: TextAlign.center,
-                ),
-              ),
-
-            const SizedBox(height: 30),
-
+            const SizedBox(height: 20),
+            
+            // The Upload Button
             ElevatedButton.icon(
               onPressed: _isScanning ? null : _pickAndScanImage,
               icon: const Icon(Icons.document_scanner),
@@ -142,6 +159,42 @@ class _HomeScreenState extends State<HomeScreen> {
                 textStyle: const TextStyle(fontSize: 18),
               ),
             ),
+            
+            const SizedBox(height: 20),
+
+            if (_isScanning)
+              const CircularProgressIndicator(),
+            
+            if (_errorMessage.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Text(_errorMessage, style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+              ),
+
+            // 4. THE UI: A clickable list of items
+            if (_parsedItems.isNotEmpty)
+              Expanded(
+                child: ListView.builder(
+                  itemCount: _parsedItems.length,
+                  itemBuilder: (context, index) {
+                    final item = _parsedItems[index];
+                    return Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      child: CheckboxListTile(
+                        title: Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Text('\$${item.price.toStringAsFixed(2)}', style: const TextStyle(color: Colors.teal)),
+                        value: item.isSelected,
+                        activeColor: Colors.teal,
+                        onChanged: (bool? value) {
+                          setState(() {
+                            item.isSelected = value ?? false;
+                          });
+                        },
+                      ),
+                    );
+                  },
+                ),
+              ),
           ],
         ),
       ),
