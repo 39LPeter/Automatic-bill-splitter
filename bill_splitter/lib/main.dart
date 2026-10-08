@@ -48,7 +48,23 @@ class _HomeScreenState extends State<HomeScreen> {
   
   // 2. STATE VARIABLES
   List<ReceiptItem> _parsedItems = [];
-  String _receiptCurrency = '\$'; // Default currency
+  String _receiptCurrency = '\$'; 
+  
+  // VARIABLE TO HOLD THE USER's TOTAL
+  double _selectedTotal = 0.0;
+
+  // FUNCTION TO CALCULATE TOTAL
+  void _calculateTotal() {
+    double tempTotal = 0.0;
+    for (var item in _parsedItems) {
+      if (item.isSelected) {
+        tempTotal += item.price;
+      }
+    }
+    setState(() {
+      _selectedTotal = tempTotal;
+    });
+  }
 
   Future<void> _pickAndScanImage() async {
     final XFile? selectedImage = await _picker.pickImage(source: ImageSource.gallery);
@@ -59,6 +75,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _isScanning = true;
         _errorMessage = "";
         _parsedItems.clear();
+        _selectedTotal = 0.0; // Reset total on new scan
       });
 
       await _scanReceipt(selectedImage);
@@ -96,11 +113,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
         final parsedText = json['ParsedResults'][0]['ParsedText'];
         
-        // --- NEW: CURRENCY DETECTOR ---
-        String tempCurrency = '\$'; // Default to dollar
+        String tempCurrency = '\$'; 
         String lowerText = parsedText.toLowerCase();
         
-        // Scan the whole receipt text for specific currency markers
         if (lowerText.contains('ksh') || lowerText.contains('kes')) {
           tempCurrency = 'Ksh ';
         } else if (lowerText.contains('ugx')) {
@@ -113,11 +128,9 @@ class _HomeScreenState extends State<HomeScreen> {
           tempCurrency = '£';
         }
 
-        // 3. THE SMART PARSER
         List<ReceiptItem> tempItems = [];
         List<String> lines = parsedText.split('\n');
         
-        // Allows for optional currency symbols at the start of the price
         RegExp priceRegex = RegExp(r'^(.*?)\s+[\$£€]?\s*(\d+\.\d{2})\s*$');
         
         for (int i = 0; i < lines.length; i++) {
@@ -130,7 +143,6 @@ class _HomeScreenState extends State<HomeScreen> {
             
             String lowerName = itemName.toLowerCase();
             
-            // FILTER 1: Ignore zero-cost items, payments, and totals
             if (itemPrice <= 0 ||
                 lowerName.contains('total') || 
                 lowerName.contains('tax') || 
@@ -141,7 +153,6 @@ class _HomeScreenState extends State<HomeScreen> {
               continue; 
             }
 
-            // FILTER 2: Fix the names
             if (lowerName.contains(' pc') || lowerName.contains(' kg') || RegExp(r'^\d{4,}').hasMatch(itemName)) {
                 if (i > 0) {
                     String previousLine = lines[i-1].trim();
@@ -160,7 +171,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
         setState(() {
           _parsedItems = tempItems;
-          _receiptCurrency = tempCurrency; // Save the detected currency to the state
+          _receiptCurrency = tempCurrency; 
           
           if (_parsedItems.isEmpty) {
             _errorMessage = "Couldn't find any prices on this receipt. Try a clearer photo.";
@@ -215,7 +226,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Text(_errorMessage, style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
               ),
 
-            // 4. THE UI
             if (_parsedItems.isNotEmpty)
               Expanded(
                 child: ListView.builder(
@@ -226,13 +236,14 @@ class _HomeScreenState extends State<HomeScreen> {
                       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                       child: CheckboxListTile(
                         title: Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                        // --- NEW: DISPLAYS THE DYNAMIC CURRENCY ---
                         subtitle: Text('$_receiptCurrency${item.price.toStringAsFixed(2)}', style: const TextStyle(color: Colors.teal)),
                         value: item.isSelected,
                         activeColor: Colors.teal,
                         onChanged: (bool? value) {
                           setState(() {
                             item.isSelected = value ?? false;
+                            // RECALCULATE TOTAL WHEN TAPPED
+                            _calculateTotal(); 
                           });
                         },
                       ),
@@ -240,6 +251,223 @@ class _HomeScreenState extends State<HomeScreen> {
                   },
                 ),
               ),
+          ],
+        ),
+      ),
+      // BOTTOM BAR TO SHOW TOTAL
+      bottomNavigationBar: _parsedItems.isNotEmpty 
+        ? SafeArea(
+            child: Container(
+              padding: const EdgeInsets.all(16.0),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 10,
+                    offset: const Offset(0, -5),
+                  )
+                ]
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Total: $_receiptCurrency${_selectedTotal.toStringAsFixed(2)}',
+                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
+                  ElevatedButton(
+                    // Button is disabled if total is 0
+                    onPressed: _selectedTotal > 0 ? () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => PaymentScreen(
+                            totalAmount: _selectedTotal,
+                            currency: _receiptCurrency,
+                          ),
+                        ),
+                      );
+                    } : null, 
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.teal,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    ),
+                    child: const Text('Confirm Share', style: TextStyle(fontSize: 16)),
+                  ),
+                ],
+              ),
+            ),
+          )
+        : null, 
+    );
+  }
+}
+
+// ---------------------------------------------------
+// --- THE ONAFRIQ EAST AFRICA PAYMENT SCREEN ---
+// ---------------------------------------------------
+class PaymentScreen extends StatefulWidget {
+  final double totalAmount;
+  final String currency;
+
+  const PaymentScreen({super.key, required this.totalAmount, required this.currency});
+
+  @override
+  State<PaymentScreen> createState() => _PaymentScreenState();
+}
+
+class _PaymentScreenState extends State<PaymentScreen> {
+  final TextEditingController _phoneController = TextEditingController();
+  bool _isProcessing = false;
+  String _paymentStatus = "";
+  
+  String _selectedCountry = 'Kenya (M-Pesa / Airtel)';
+
+  final List<String> _eaCountries = [
+    'Kenya (M-Pesa / Airtel)',
+    'Uganda (MTN / Airtel)',
+    'Tanzania (Vodacom / Tigo / Airtel)',
+    'Rwanda (MTN / Airtel)',
+    'DRC (Orange / M-Pesa / Airtel)',
+    'Ethiopia (Telebirr / M-Pesa)',
+    'Burundi (EcoCash / Lumicash)',
+    'South Sudan (m-GURUSH)',
+    'Somalia (EVC Plus)'
+    'Nigeria(Opay/Paga/MoMo)',
+    'Ghana(MTN MoMo/Telecel Cash)',
+    'Côte d\'Ivoire (Orange/ MTN)',
+    'Senegal (Wave / Orange Money)'
+    'Cameroon (MTN / Orange Money)',
+    'South Africa (Vodapay / MTN)',
+    'Zambia (Airtel / MTN)',
+    'Zimbabwe (EcoCash)',
+    'Egypt (Vodafone Cash)'
+  ];
+
+  void _simulateOnafriqPayment() {
+    if (_phoneController.text.isEmpty) {
+      setState(() {
+        _paymentStatus = "Please enter your mobile money number.";
+      });
+      return;
+    }
+
+    setState(() {
+      _isProcessing = true;
+      _paymentStatus = "Connecting to Onafriq Gateway...\nSending payment prompt to ${_phoneController.text} via $_selectedCountry.";
+    });
+
+    Future.delayed(const Duration(seconds: 4), () {
+      setState(() {
+        _isProcessing = false;
+        _paymentStatus = "Payment of ${widget.currency}${widget.totalAmount.toStringAsFixed(2)} Successful! ✅\nProcessed securely across borders.";
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Checkout'),
+        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Your Total Share',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 18, color: Colors.grey),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              '${widget.currency}${widget.totalAmount.toStringAsFixed(2)}',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 40, fontWeight: FontWeight.bold, color: Colors.teal),
+            ),
+            const SizedBox(height: 40),
+            
+            DropdownButtonFormField<String>(
+              value: _selectedCountry,
+              decoration: const InputDecoration(
+                labelText: 'Select Country & Provider',
+                prefixIcon: Icon(Icons.public),
+                border: OutlineInputBorder(),
+              ),
+              isExpanded: true,
+              items: _africanCountries.map((String country) {
+                return DropdownMenuItem<String>(
+                  value: country,
+                  child: Text(country, style: const TextStyle(fontSize: 14)),
+                );
+              }).toList(),
+              onChanged: (String? newValue) {
+                setState(() {
+                  _selectedCountry = newValue!;
+                });
+              },
+            ),
+            const SizedBox(height: 20),
+
+            TextField(
+              controller: _phoneController,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(
+                labelText: 'Mobile Money Number',
+                hintText: 'e.g., 0712345678',
+                prefixIcon: Icon(Icons.phone_android),
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 20),
+            
+            if (_paymentStatus.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.all(16),
+                margin: const EdgeInsets.only(bottom: 20),
+                decoration: BoxDecoration(
+                  color: _paymentStatus.contains('Successful') ? Colors.green.shade50 : Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: _paymentStatus.contains('Successful') ? Colors.green : Colors.blue,
+                  ),
+                ),
+                child: Text(
+                  _paymentStatus,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
+                    height: 1.4,
+                    color: _paymentStatus.contains('Successful') ? Colors.green.shade700 : Colors.blue.shade700,
+                  ),
+                ),
+              ),
+              
+            ElevatedButton(
+              onPressed: _isProcessing ? null : _simulateOnafriqPayment,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.teal.shade700, 
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+              ),
+              child: _isProcessing 
+                ? const CircularProgressIndicator(color: Colors.white)
+                : const Text('Process Mobile Money Payment', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
+            
+            const SizedBox(height: 16),
+            const Text(
+              'Powered by Onafriq Pan-African Gateway',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            )
           ],
         ),
       ),
