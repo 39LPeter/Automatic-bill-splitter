@@ -325,7 +325,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
   
   String _selectedCountry = 'Kenya (M-Pesa / Airtel)';
 
-  final List<String> _eaCountries = [
+  final List<String> _africanCountries = [
     'Kenya (M-Pesa / Airtel)',
     'Uganda (MTN / Airtel)',
     'Tanzania (Vodacom / Tigo / Airtel)',
